@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#0d1513">
+<title>徒步星球</title>
+<meta name="description" content="在 3D 地球上看全世界经典徒步路线：按冰川、雪山、森林等分类和里程筛选，随机传送，自动沿线飞行。">
+<link rel="stylesheet" href="vendor/maplibre-gl.css">
+<style>
+/* 布局：全屏 3D 地球；桌面左列表 + 右详情浮层，手机顶部筛选 + 底部抽屉（卡片横滑 / 路线详情） */
+:root {
+  --ink: #0d1513;            /* 夜色云杉：面板底 */
+  --panel: rgba(13, 21, 19, .80);
+  --panel-solid: #121c1a;
+  --line: rgba(220, 235, 228, .12);
+  --fg: #eef3ef;             /* 冰川白 */
+  --muted: #98aaa3;
+  --blaze: #ffd23f;          /* 步道漆黄：选中路线、主按钮 */
+  --blaze-ink: #231c00;
+  --c-glacier: #7fd3ff; --c-snow: #d9e4ff; --c-forest: #5fcf80; --c-coast: #2ec4d6;
+  --c-canyon: #f08a4b; --c-volcano: #ff5e57; --c-peak: #c4a4ff; --c-meadow: #c3dd4f;
+  --serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", STSong, serif;
+  --sans: -apple-system, "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --r: 14px;
+  --safe-t: env(safe-area-inset-top, 0px); --safe-b: env(safe-area-inset-bottom, 0px);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; background: var(--ink); color: var(--fg); font: 14px/1.5 var(--sans); overflow: hidden; -webkit-text-size-adjust: 100%; }
+button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--blaze); outline-offset: 2px; }
+#map { position: fixed; inset: 0; }
+.glass { background: var(--panel); -webkit-backdrop-filter: blur(14px) saturate(1.2); backdrop-filter: blur(14px) saturate(1.2); border: 1px solid var(--line); }
+
+/* ---------- 顶部 */
+#top { position: fixed; left: 16px; right: 16px; top: calc(12px + var(--safe-t)); display: flex; flex-direction: column; gap: 10px; pointer-events: none; z-index: 3; }
+#top > * { pointer-events: auto; }
+.bar { display: flex; align-items: center; gap: 10px; }
+.brand { display: flex; align-items: baseline; gap: 10px; padding: 8px 14px; border-radius: var(--r); min-width: 0; }
+.brand h1 { margin: 0; font: 700 20px/1.1 var(--serif); letter-spacing: .08em; white-space: nowrap; }
+.brand small { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.actions { margin-left: auto; display: flex; gap: 8px; }
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); white-space: nowrap; font-weight: 600; }
+.btn svg { width: 16px; height: 16px; flex: none; }
+.btn.primary { background: var(--blaze); color: var(--blaze-ink); border-color: transparent; }
+.btn[aria-pressed="true"] { background: var(--blaze); color: var(--blaze-ink); border-color: transparent; }
+.btn:hover { filter: brightness(1.08); }
+
+.filters { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: var(--r); max-width: 640px; }
+.row { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.row::-webkit-scrollbar { display: none; }
+.chip { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--fg); font-size: 13px; }
+.chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c, var(--fg)); }
+.chip b { font: 500 11px var(--mono); color: var(--muted); }
+.chip[aria-pressed="true"] { background: var(--fg); color: var(--ink); border-color: var(--fg); }
+.chip[aria-pressed="true"] b { color: #44524d; }
+.seg { display: flex; padding: 3px; gap: 2px; border-radius: 999px; background: rgba(0,0,0,.28); flex: none; }
+.seg button { height: 28px; padding: 0 11px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font: 600 12px var(--sans); white-space: nowrap; }
+.seg button[aria-pressed="true"] { background: var(--blaze); color: var(--blaze-ink); }
+.seg-label { flex: none; align-self: center; color: var(--muted); font-size: 12px; padding-right: 2px; }
+
+/* ---------- 列表 */
+#list { position: fixed; z-index: 2; display: flex; gap: 8px; }
+.card { display: grid; grid-template-columns: 10px 1fr auto; column-gap: 10px; align-items: center; text-align: left; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
+.card i { width: 10px; height: 10px; border-radius: 50%; background: var(--c); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 25%, transparent); }
+.card .n { font: 700 15px/1.3 var(--serif); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card .w { grid-column: 2; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card .k { grid-row: 1 / span 2; grid-column: 3; text-align: right; font: 600 13px var(--mono); font-variant-numeric: tabular-nums; }
+.card .k small { display: block; color: var(--muted); font: 11px var(--sans); }
+.card[aria-current="true"] { border-color: var(--blaze); box-shadow: inset 0 0 0 1px var(--blaze); }
+.empty { padding: 14px; color: var(--muted); border-radius: 12px; }
+
+/* ---------- 详情 */
+#detail { position: fixed; z-index: 4; border-radius: 18px; display: flex; flex-direction: column; overflow: hidden; }
+.d-head { padding: 16px 16px 10px; display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; }
+.d-tag { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.d-tag i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+.d-head h2 { grid-column: 1; margin: 0; font: 700 24px/1.2 var(--serif); letter-spacing: .02em; text-wrap: balance; }
+.d-en { grid-column: 1; color: var(--muted); font-size: 12px; letter-spacing: .02em; }
+.x { grid-row: 1 / span 2; grid-column: 2; width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line); background: transparent; display: grid; place-items: center; }
+.x svg { width: 16px; height: 16px; }
+.grab { display: none; }
+.d-body { padding: 0 16px 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--line); border-radius: 12px; overflow: hidden; }
+.stats div { background: var(--panel-solid); padding: 8px 10px; min-width: 0; }
+.stats dt { color: var(--muted); font-size: 11px; }
+.stats dd { margin: 0; font: 600 15px/1.35 var(--mono); font-variant-numeric: tabular-nums; }
+.stats dd small { font: 11px var(--sans); color: var(--muted); }
+.lvl { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.lvl span { display: inline-flex; gap: 3px; }
+.lvl span i { width: 18px; height: 6px; border-radius: 3px; background: var(--line); }
+.lvl span i.on { background: var(--blaze); }
+.lvl em { font-style: normal; color: var(--muted); font-size: 12px; margin-left: auto; }
+.desc { margin: 0; color: #d3ddd8; font-size: 14px; line-height: 1.7; }
+.prof { position: relative; }
+#prof { display: block; width: 100%; height: 96px; touch-action: none; cursor: ew-resize; }
+.ctl { display: flex; align-items: center; gap: 10px; }
+.ctl input[type=range] { flex: 1; min-width: 0; accent-color: var(--blaze); height: 28px; }
+.ctl .btn { height: 36px; }
+.nav { display: flex; gap: 8px; }
+.nav .btn { flex: 1; justify-content: center; }
+.note { color: var(--muted); font-size: 11px; }
+
+/* 走到哪 */
+.hiker { width: 18px; height: 18px; border-radius: 50%; background: var(--blaze); border: 3px solid #fff; box-shadow: 0 0 0 6px rgba(255, 210, 63, .35), 0 2px 8px rgba(0,0,0,.5); }
+.pinlabel { padding: 4px 10px; border-radius: 999px; background: var(--blaze); color: var(--blaze-ink); font: 700 13px var(--serif); white-space: nowrap; box-shadow: 0 2px 10px rgba(0,0,0,.4); transform: translateY(-16px); }
+.tip { position: fixed; z-index: 6; pointer-events: none; padding: 6px 10px; border-radius: 10px; font-size: 12px; background: var(--panel-solid); border: 1px solid var(--line); }
+.tip b { font: 700 13px var(--serif); display: block; }
+#toast { position: fixed; z-index: 7; left: 50%; transform: translateX(-50%); top: calc(50% - 20px); padding: 8px 14px; border-radius: 999px; background: var(--panel-solid); border: 1px solid var(--line); font-size: 13px; transition: opacity .3s; }
+
+.maplibregl-ctrl-attrib { background: rgba(13,21,19,.6) !important; color: var(--muted); font-size: 10px; }
+.maplibregl-ctrl-attrib a { color: var(--muted); }
+.maplibregl-ctrl-attrib-button { filter: invert(1); }
+
+/* ---------- 桌面 */
+@media (min-width: 900px) {
+  #list { left: 16px; top: calc(var(--top, 170px) + 10px); bottom: 32px; width: 300px; flex-direction: column; overflow-y: auto; scrollbar-width: thin; padding-right: 4px; }
+  #detail { right: 16px; top: calc(68px + var(--safe-t)); width: 380px; max-height: calc(100% - 100px); }
+  .card:hover { border-color: rgba(255,255,255,.3); }
+}
+/* ---------- 手机 */
+@media (max-width: 899px) {
+  #top { left: 12px; right: 12px; top: calc(8px + var(--safe-t)); gap: 8px; }
+  .brand { padding: 6px 12px; }
+  .brand small { display: none; }
+  .btn { height: 36px; padding: 0 12px; }
+  .btn .t { display: none; }
+  .filters { padding: 8px; max-width: none; }
+  #list { left: 0; right: 0; bottom: calc(12px + var(--safe-b)); padding: 0 12px; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+  #list::-webkit-scrollbar { display: none; }
+  #list .card { flex: none; width: 72%; max-width: 300px; scroll-snap-align: start; }
+  #detail { left: 8px; right: 8px; bottom: calc(8px + var(--safe-b)); max-height: 58%; border-radius: 18px; }
+  #detail.min .d-body > :not(.prof):not(.ctl) { display: none; }
+  #detail.min .d-en { display: none; }
+  .grab { width: 40px; height: 4px; border-radius: 2px; background: rgba(255,255,255,.25); margin: 8px auto -4px; flex: none; }
+  .d-head { cursor: pointer; }
+  .d-head { padding: 12px 14px 8px; }
+  .d-head h2 { font-size: 20px; }
+  .d-body { padding: 0 14px 12px; gap: 10px; }
+  #prof { height: 72px; }
+  .stats dd { font-size: 14px; }
+}
+@media (max-width: 380px) { .seg button { padding: 0 8px; } }
+</style>
+</head>
+<body>
+<div id="map" aria-label="3D 地球与徒步路线"></div>
+
+<header id="top">
+  <div class="bar">
+    <div class="brand glass"><h1>徒步星球</h1><small id="count">全球经典徒步路线 · 3D 地形</small></div>
+    <div class="actions">
+      <button class="btn" id="globe" title="回到地球"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg><span class="t">地球</span></button>
+      <button class="btn" id="dice" title="随机一条路线"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8.5" cy="8.5" r="1.3" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/></svg><span class="t">随机</span></button>
+      <button class="btn" id="tour" aria-pressed="false" title="自动巡游"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg><span class="t">自动巡游</span></button>
+    </div>
+  </div>
+  <div class="filters glass">
+    <div class="row" id="cats" role="group" aria-label="按地貌筛选"></div>
+    <div class="row"><span class="seg-label">里程</span><div class="seg" id="dist" role="group" aria-label="按里程筛选"></div></div>
+  </div>
+</header>
+
+<nav id="list" aria-label="路线列表"></nav>
+
+<section id="detail" class="glass" hidden aria-live="polite">
+  <div class="grab" aria-hidden="true"></div>
+  <div class="d-head">
+    <span class="d-tag" id="d-tag"></span>
+    <h2 id="d-name"></h2>
+    <span class="d-en" id="d-en"></span>
+    <button class="x" id="d-close" aria-label="关闭详情"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>
+  <div class="d-body">
+    <dl class="stats" id="d-stats"></dl>
+    <div class="lvl" id="d-lvl"></div>
+    <p class="desc" id="d-desc"></p>
+    <div class="prof"><canvas id="prof" aria-label="海拔剖面，可拖动查看沿线"></canvas></div>
+    <div class="ctl">
+      <button class="btn primary" id="play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg><span>沿线飞行</span></button>
+      <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="沿路线位置">
+    </div>
+    <div class="nav">
+      <button class="btn" id="prev">上一条</button>
+      <button class="btn" id="next">下一条</button>
+    </div>
+    <div class="note" id="d-note"></div>
+  </div>
+</section>
+
+<div id="toast" hidden></div>
+
+<script src="vendor/maplibre-gl.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
