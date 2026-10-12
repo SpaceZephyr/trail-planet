@@ -137,6 +137,30 @@ def profile(line, n=160):
     return out
 
 
+def snap(line, p):
+    """点到折线最近处的沿线里程（km）"""
+    best, acc = (1e9, 0), 0.0
+    for a, b in zip(line, line[1:]):
+        seg = km(a, b); u = 0.0
+        if seg > 0:
+            k = math.cos(math.radians(a[1])); dx, dy = (b[0] - a[0]) * k, b[1] - a[1]
+            u = max(0, min(1, (((p[0] - a[0]) * k) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)))
+        q = [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u]
+        best = min(best, (km(q, p), acc + seg * u)); acc += seg
+    if best[0] > 0.4: print(f"     !! 看点 {p} 离轨迹 {best[0]:.2f} km")
+    return best[1]
+
+
+def stops(t, line, prof):
+    out = []
+    for s in t.get("stops", []):
+        d = max(prof, key=lambda p: p[1])[0] if s["at"] == "top" else snap(line, s["at"])
+        o = {k: s[k] for k in ("kind", "name", "text")}; o["d"] = round(d, 3)
+        if s.get("look"): o["look"] = [*s["look"][:2], round(dem.at(*s["look"][:2], z=12))]   # 带上海拔，镜头好算仰角
+        out.append(o)
+    return sorted(out, key=lambda o: o["d"])
+
+
 def main():
     only = set(sys.argv[1:]); dst = HERE.parent / "data/trails.json"
     old = {t["id"]: t for t in json.loads(dst.read_text())} if dst.exists() and only else {}
@@ -163,6 +187,8 @@ def main():
         o = {k: t[k] for k in ("id", "name", "en", "where", "cat", "kind", "days", "max", "level", "season", "desc")}
         o.update(km=t["km"] or round(L * (2 if t["kind"] == "outback" else 1), 1), line_km=round(L, 2), src=r["src"],
                  line=[[round(x, 5), round(y, 5)] for x, y in line], prof=prof, gain=round(gain / 10) * 10, lo=min(e), hi=max(e))
+        if t.get("stops"): o["stops"] = stops(t, line, prof)
+        if t.get("marks"): o["marks"] = t["marks"]
         out.append(o); print(f"     → {r['src']} {L:.1f} km, {len(line)} 点, 海拔 {min(e)}–{max(e)} m")
     dst.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")))
     if bad: print("失败：", " ".join(bad))

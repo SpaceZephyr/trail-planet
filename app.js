@@ -33,6 +33,7 @@ function prep(t) {
   let x0 = 180, y0 = 90, x1 = -180, y1 = -90;
   for (const [x, y] of t.line) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
   t.bbox = [[x0, y0], [x1, y1]];
+  (t.stops || []).forEach((s, i) => { s.i = i; s.dj = clamp(s.d / t.line_km * t.len, 0, t.len); });
 }
 function along(t, d) {
   d = clamp(d, 0, t.len); const c = t.cum; let lo = 0, hi = c.length - 1;
@@ -44,7 +45,7 @@ const slice = (t, d) => { const r = along(t, d); return t.line.slice(0, r.i + 1)
 
 // ---------- 地图
 const map = new maplibregl.Map({
-  container: 'map', center: [96, 24], zoom: mobile() ? 1.15 : 1.75, maxPitch: 80, hash: false,
+  container: 'map', center: [96, 24], zoom: mobile() ? 1.15 : 1.75, maxPitch: 85, hash: false,
   attributionControl: { compact: true, customAttribution: '路线 © OpenStreetMap 贡献者 · 徒步星球' },
   style: {
     version: 8, projection: { type: 'globe' },
@@ -53,7 +54,8 @@ const map = new maplibregl.Map({
       dem: { type: 'raster-dem', tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'], encoding: 'terrarium', tileSize: 256, maxzoom: 13, attribution: '高程 © Mapzen, AWS Terrain Tiles' },
     },
     sky: {
-      'sky-color': '#0b1a2e', 'horizon-color': '#9fc7e8', 'fog-color': '#cfe3f2', 'sky-horizon-blend': 0.6, 'horizon-fog-blend': 0.6, 'fog-ground-blend': 0.75,
+      'sky-color': ['interpolate', ['linear'], ['zoom'], 6, '#0b1a2e', 11, '#3f7fc0'], 'horizon-color': '#b9d8ee', 'fog-color': '#d6e6f0',
+      'sky-horizon-blend': 0.55, 'horizon-fog-blend': 0.7, 'fog-ground-blend': 0.88,
       'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 1, 5, 1, 9, 0.4, 12, 0],
     },
     layers: [{ id: 'bg', type: 'background', paint: { 'background-color': '#04070b' } }, { id: 'sat', type: 'raster', source: 'sat', paint: { 'raster-fade-duration': 200 } }],
@@ -62,11 +64,12 @@ const map = new maplibregl.Map({
 map.touchPitch.enable();
 map.on('error', e => console.warn('[map]', e.error && e.error.message));
 
+let EXAG = 1.45;            // 远看夸张一点地形更立体；贴地跟拍时改回 1（真实比例）
 const fc = f => ({ type: 'FeatureCollection', features: f });
 const lineF = (coords, props = {}) => ({ type: 'Feature', properties: props, geometry: { type: 'LineString', coordinates: coords } });
 
 function addLayers() {
-  map.setTerrain({ source: 'dem', exaggeration: 1.45 });
+  map.setTerrain({ source: 'dem', exaggeration: EXAG });
   map.addSource('trails', { type: 'geojson', data: fc(T.map(t => lineF(t.line, { id: t.id, color: COLOR[t.cat] }))) });
   map.addSource('starts', { type: 'geojson', data: fc(T.map(t => ({ type: 'Feature', properties: { id: t.id, color: COLOR[t.cat] }, geometry: { type: 'Point', coordinates: t.line[0] } }))) });
   map.addSource('sel', { type: 'geojson', data: fc([]) });
@@ -106,6 +109,20 @@ function buildFilters() {
   $('#cats').onclick = e => { const b = e.target.closest('[data-cat]'); if (b) { st.cat = b.dataset.cat; applyFilter(true); } };
   $('#dist').onclick = e => { const b = e.target.closest('[data-dist]'); if (b) { st.dist = b.dataset.dist; applyFilter(true); } };
 }
+// 跟拍时把当前路线的底色线、光晕藏起来（近处会被透视放大成色块）
+let chasing = false;
+function chaseMode(on) {
+  on = !!on; if (on === chasing || !map.getLayer('tl')) return; chasing = on;
+  map.setLayoutProperty('sel-glow', 'visibility', on ? 'none' : 'visible');
+  map.setCenterClampedToGround(!on);
+  EXAG = on ? 1 : 1.45; map.setTerrain({ source: 'dem', exaggeration: EXAG });      // 跟拍时中心点可以悬空（对准山腰），不让地图把它按回地面
+  setTrailFilter();
+}
+function setTrailFilter() {
+  if (!map.getLayer('tl')) return;
+  const ids = shown.filter(t => !(chasing && t === cur)).map(t => t.id), f = ['in', ['get', 'id'], ['literal', ids]];
+  for (const id of ['tl', 'tl-case', 'pt', 'pt-halo']) map.setFilter(id, f);
+}
 function applyFilter(user) {
   try { localStorage.setItem('tp-filter', JSON.stringify(st)); } catch (e) {}
   document.querySelectorAll('[data-cat]').forEach(b => b.setAttribute('aria-pressed', b.dataset.cat === st.cat));
@@ -113,10 +130,7 @@ function applyFilter(user) {
   document.querySelectorAll('[data-n]').forEach(b => { b.textContent = T.filter(t => matches(t, b.dataset.n)).length; });
   shown = T.filter(t => matches(t));
   $('#count').textContent = `${shown.length} 条经典徒步路线 · 3D 地形`;
-  if (map.getLayer('tl')) {
-    const f = ['in', ['get', 'id'], ['literal', shown.map(t => t.id)]];
-    for (const id of ['tl', 'tl-case', 'pt', 'pt-halo']) map.setFilter(id, f);
-  }
+  setTrailFilter();
   renderList();
   if (user && cur && !shown.includes(cur)) close();
   if (user && shown.length && !cur) fitAll();
@@ -149,6 +163,10 @@ function select(t, { fly } = {}) {
   ].map(([a, b]) => `<div><dt>${a}</dt><dd title="${b.replace(/<[^>]+>/g, '')}">${b}</dd></div>`).join('');
   $('#d-lvl').innerHTML = `难度 <span>${[1, 2, 3, 4, 5].map(i => `<i class="${i <= t.level ? 'on' : ''}"></i>`).join('')}</span> ${LEVEL[t.level]}<em>海拔 ${t.lo.toLocaleString()}–${t.hi.toLocaleString()} m</em>`;
   $('#d-desc').textContent = t.desc;
+  $('#d-stops').hidden = !t.stops;
+  $('#d-stops').innerHTML = t.stops ? `<h3>沿途看点 <small>沿线飞行会在每一站停下来</small></h3><ol>${t.stops.map(s =>
+    `<li><button data-stop="${s.i}" style="--k:${KC[s.kind]}">${ICON[s.kind]}<span>${s.name}</span><em>${fmtKm(s.d)} km</em></button></li>`).join('')}</ol>` : '';
+  showStory(t);
   $('#d-note').textContent = (t.src === 'line' ? '轨迹为途经点连线示意' : '轨迹沿 OpenStreetMap 步道生成') + (t.kind === 'outback' ? '，图上只画去程' : '') + '；里程、天数为常见走法，出发前请以当地信息为准。';
   $('#detail').hidden = false; $('#detail').classList.toggle('min', mobile());
   if (mobile()) $('#list').hidden = true;
@@ -163,14 +181,14 @@ function select(t, { fly } = {}) {
   if (fly) overview(t);
 }
 function close() {
-  pause(); cur = null; $('#detail').hidden = true; $('#list').hidden = false;
+  pause(); cur = null; showStory(null); chaseMode(false); $('#detail').hidden = true; $('#list').hidden = false;
   pin.remove(); hiker.remove();
   map.getSource('sel')?.setData(fc([])); map.getSource('done')?.setData(fc([]));
   history.replaceState(null, '', location.pathname);
   renderList();
 }
 $('#d-close').onclick = () => { stopTour(); close(); };
-const toggleSheet = e => { if (mobile() && !e.target.closest('.x')) { $('#detail').classList.toggle('min'); requestAnimationFrame(drawProf); } };
+const toggleSheet = e => { if (mobile() && !e.target.closest('.x')) { $('#detail').classList.toggle('min'); requestAnimationFrame(() => { drawProf(); placeCap(); }); } };
 $('.d-head').addEventListener('click', toggleSheet); $('.grab').addEventListener('click', toggleSheet);
 function step(k) {
   if (!shown.length) return;
@@ -193,6 +211,7 @@ let camTok = 0;
 // 镜头飞完再做下一步（被用户打断或被新镜头顶掉就不做）
 const after = (tok, fn) => { const go = () => tok === camTok && fn(); reduce ? setTimeout(go, 0) : map.once('moveend', go); };
 function overview(t, done) {
+  if (cur === t && t.stops) { setProg(prog, false); markShow(); }
   const tok = ++camTok, p = pad();
   let cam = null;
   try { cam = map.cameraForBounds(t.bbox, { padding: p, pitch: 55, bearing: -15 }); } catch (e) {}
@@ -214,43 +233,97 @@ function fitAll() {
 }
 
 // ---------- 沿线：进度、镜头跟随
-let camB = 0;
-function setProg(p, follow, snap, k = 0.05) {
+// 有看点的路线（story）用跟拍镜头：相机放在人身后几百米、离地几百米，朝前看；停在看点时转向要看的东西
+const cam = { b: 0, p: 62, z: 12, back: 0.8, clear: 520 };
+const ZERO = { top: 0, bottom: 0, left: 0, right: 0 };
+if (/[?&]debug/.test(location.search)) window.__tp = { map, cam };
+const offset = (p, b, km) => [p[0] + km * Math.sin(b * rad) / (111.32 * Math.cos(p[1] * rad)), p[1] + km * Math.cos(b * rad) / 110.57];
+function eleAt(t, d) { const P = t.prof; return P[clamp(Math.round(d / t.len * (P.length - 1)), 0, P.length - 1)][1]; }
+function camFor(t, d, stop) {
+  const here = along(t, d).p, look = clamp(t.len * 0.05, 0.3, 6);
+  const want = brg(along(t, Math.max(0, d - look * 0.3)).p, along(t, Math.min(t.len, d + look)).p);
+  if (!t.stops) return { c: here, b: want, p: 62, z: zoomFor(t.len) };
+  if (stop && stop.look) {   // 看点：转身对着要看的东西；远处雪山把相机抬高、往后拉，让山顶留在画面上部
+    const far = hav(here, stop.look) > 3;
+    return { c: here, b: brg(here, stop.look), look: stop.look, p: far ? 85 : 70, back: far ? 1.4 : 0.55, clear: far ? 1100 : 320 };
+  }
+  return { c: here, b: want, look: null, p: 80, back: 1.0, clear: 380 };
+}
+// 跟拍：相机在人身后 back km、离地 clear m，对准一个目标点（行进时是前方 1.2 km 的地面，看点时是那座山/那条瀑布）。
+// 用「相机点 → 目标点」反算镜头，地图中心就落在目标上，不会被放到海平面上。
+function chase(t, d, sway = 0) {
+  const H = along(t, d).p, b = cam.b + sway, C = offset(H, b + 180, cam.back), M = offset(H, b + 180, cam.back / 2);
+  const g = q => map.queryTerrainElevation(q) || 0, eH = eleAt(t, d) * EXAG;
+  const ground = Math.max(eH, g(H), g(C), g(M));
+  const wantAlt = ground + cam.clear, first = cam.alt == null;
+  cam.alt = first ? wantAlt : Math.max(cam.alt + (wantAlt - cam.alt) * 0.08, ground + 150);
+  const T = cam.look ? cam.look.slice(0, 2) : offset(H, b, 1.2);
+  cam.T = first || !cam.T ? T : [cam.T[0] + (T[0] - cam.T[0]) * 0.06, cam.T[1] + (T[1] - cam.T[1]) * 0.06];
+  const horiz = hav(C, cam.T) * 1000, minAlt = cam.alt - horiz / Math.tan(cam.p * rad);   // 压住俯仰角不超过 cam.p
+  const tAlt = cam.look ? minAlt : Math.max(g(cam.T) || eH, minAlt);
+  cam.tAlt = first || cam.tAlt == null ? tAlt : cam.tAlt + (tAlt - cam.tAlt) * 0.08;
+  cam.C = C;
+  const o = map.calculateCameraOptionsFromTo(C, cam.alt, cam.T, cam.tAlt);
+  return { center: o.center, zoom: o.zoom, elevation: o.elevation, pitch: o.pitch, bearing: o.bearing, padding: ZERO };
+}
+function setProg(p, follow, snap, k = 0.05, stop = null, sway = 0) {
   prog = clamp(p, 0, 1); const t = cur; if (!t) return;
   const d = prog * t.len, r = along(t, d);
   hiker.setLngLat(r.p);
-  map.getSource('done')?.setData(fc(prog > 0 ? [lineF(slice(t, d))] : []));
+  // 跟拍时相机就在走过的路上方，近处的线会被透视放得很粗：只画前方的路
+  const ahead = follow && t.stops;
+  map.getSource('done')?.setData(fc(prog > 0 && !ahead ? [lineF(slice(t, d))] : []));
+  map.getSource('sel')?.setData(fc([lineF(ahead ? [r.p, ...t.line.slice(r.i + 1)] : t.line)]));
+  chaseMode(ahead);
   $('#scrub').value = Math.round(prog * 1000);
+  updStop(d, !!stop);
   drawProf();
   if (follow) {
-    const look = clamp(t.len * 0.05, 0.3, 6);
-    const a = along(t, Math.max(0, d - look * 0.3)).p, b = along(t, Math.min(t.len, d + look)).p;
-    const want = brg(a, b);
-    camB = snap ? want : lerpAng(camB, want, k);
-    map.jumpTo({ center: r.p, zoom: zoomFor(t.len), pitch: 62, bearing: camB, padding: pad() });
+    const w = camFor(t, d, stop);
+    if (snap) { Object.assign(cam, w); cam.alt = null; cam.T = null; }
+    else {
+      cam.b = lerpAng(cam.b, w.b, k); cam.p += (w.p - cam.p) * k; cam.look = w.look;
+      if (t.stops) { cam.back += (w.back - cam.back) * k; cam.clear += (w.clear - cam.clear) * k; } else cam.z += (w.z - cam.z) * k;
+    }
+    map.jumpTo(t.stops ? chase(t, d, sway) : { center: r.p, zoom: cam.z, pitch: cam.p, bearing: cam.b + sway, padding: pad() });
+    if (t.stops) markVis();
   }
 }
-const play = { on: false, raf: 0, last: 0, dur: 20 };
+const play = { on: false, raf: 0, last: 0, dur: 20, si: 0, hold: null };
+const HOLD = reduce ? 2.5 : 5.5;
 function startPlay() {
   const t = cur; if (!t) return;
   if (prog >= 0.999) prog = 0;
-  play.on = true; setPlayBtn(); if (mobile()) $('#detail').classList.add('min');
-  play.dur = reduce ? 8 : clamp(14 + t.len * 0.11, 16, 42);
-  const r = along(t, prog * t.len), look = clamp(t.len * 0.05, 0.3, 6);
-  camB = brg(r.p, along(t, prog * t.len + look).p);
+  play.on = true; setPlayBtn(); if (mobile()) { $('#detail').classList.add('min'); requestAnimationFrame(placeCap); }
+  play.dur = reduce ? 8 : t.stops ? clamp(t.len * 1.9, 30, 60) : clamp(14 + t.len * 0.11, 16, 42);
+  const d0 = prog * t.len; play.hold = null;
+  play.si = t.stops ? (prog === 0 ? 0 : t.stops.findIndex(s => s.dj > d0 + 0.02)) : -1;
+  if (play.si < 0) play.si = t.stops ? t.stops.length : 0;
+  Object.assign(cam, camFor(t, d0)); cam.alt = null; cam.T = null;
+  if (t.stops) chaseMode(true);
   const tok = ++camTok;
-  map.flyTo({ center: r.p, zoom: zoomFor(t.len), pitch: 62, bearing: camB, padding: pad(), duration: reduce ? 0 : 2600, essential: true });
+  map.flyTo({ ...(t.stops ? chase(t, d0) : { center: cam.c, zoom: cam.z, pitch: cam.p, bearing: cam.b, padding: pad() }), duration: reduce ? 0 : 2600, essential: true });
   after(tok, () => { if (!play.on) return; play.last = performance.now(); play.raf = requestAnimationFrame(tick); });
 }
 function tick(now) {
   if (!play.on) return;
   const dt = Math.min(0.1, (now - play.last) / 1000); play.last = now;
-  const p = prog + dt / play.dur;
+  const t = cur, S = t.stops || [];
+  if (play.hold) {                                   // 停在看点：镜头转过去，慢慢摆一摆
+    const h = play.hold; h.t += dt;
+    setProg(prog, true, false, 0.035, h.s, reduce ? 0 : Math.sin(h.t / HOLD * Math.PI) * 7);
+    if (h.t >= HOLD) { play.hold = null; play.si++; if (prog >= 1) { pause(); ended(); return; } }
+    play.raf = requestAnimationFrame(tick); return;
+  }
+  const nx = S[play.si], d = prog * t.len;
+  const slow = nx ? 0.3 + 0.7 * clamp((nx.dj - d) / 0.8, 0, 1) : 1;   // 快到看点时放慢
+  let p = prog + dt / play.dur * slow;
+  if (nx && p * t.len >= nx.dj) { p = nx.dj / t.len; play.hold = { s: nx, t: 0 }; }
   setProg(p, true);
-  if (p >= 1) { pause(); ended(); return; }
+  if (p >= 1 && !play.hold) { pause(); ended(); return; }
   play.raf = requestAnimationFrame(tick);
 }
-function pause() { play.on = false; cancelAnimationFrame(play.raf); setPlayBtn(); }
+function pause() { play.on = false; play.hold = null; cancelAnimationFrame(play.raf); setPlayBtn(); }
 function setPlayBtn() {
   $('#play').innerHTML = play.on ? '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg><span>暂停</span>'
     : `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg><span>${prog > 0.001 && prog < 0.999 ? '继续' : '沿线飞行'}</span>`;
@@ -262,6 +335,76 @@ function ended() {
   if (!cur) return;
   overview(cur, () => { if (tour.on) tour.timer = setTimeout(tourNext, 2200); });
 }
+
+// ---------- 沿途看点：地图上的站点、远处地标、讲解卡片
+const KC = { start: '#ffffff', village: '#e9d8b0', climb: '#ff8a5b', view: tok('--blaze'), water: '#6cc8ff', peak: '#ffffff' };
+const svg = d => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+const ICON = {
+  start: svg('<path d="M6 21V4M6 4h11l-2 4 2 4H6"/>'),
+  village: svg('<path d="M4 11l8-6 8 6M6 10v9h12v-9M10 19v-5h4v5"/>'),
+  climb: svg('<path d="M4 20l5-5-3-3 6-6 3 3 5-5"/>'),
+  view: svg('<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.6"/>'),
+  water: svg('<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/>'),
+  peak: svg('<path d="M3 20l7-12 3 5 2-3 6 10z"/>'),
+};
+let storyMk = [], stopEls = [], capS = null;
+function showStory(t) {
+  storyMk.forEach(m => m.remove()); storyMk = []; stopEls = []; capS = null; $('#cap').hidden = true;
+  if (!t || !t.stops) return;
+  for (const m of t.marks || []) {
+    const el = Object.assign(document.createElement('div'), { className: 'mark mark-' + m.kind });
+    el.innerHTML = `${ICON[m.kind]}<b>${m.name}</b>${m.sub ? `<small>${m.sub}</small>` : ''}`;
+    storyMk.push(new maplibregl.Marker({ element: el, anchor: 'bottom', opacityWhenCovered: '0.9' }).setLngLat(m.at).addTo(map));
+  }
+  for (const s of t.stops) {
+    const el = Object.assign(document.createElement('button'), { className: 'stop', title: s.name });
+    el.style.setProperty('--k', KC[s.kind]); el.innerHTML = `${ICON[s.kind]}<span>${s.name}</span>`;
+    el.onclick = e => { e.stopPropagation(); goStop(s); };
+    stopEls.push(el); storyMk.push(new maplibregl.Marker({ element: el }).setLngLat(along(t, s.dj).p).addTo(map));
+  }
+}
+// 远处地标：在相机背后的不显示（否则会投影到画面底部）
+function markVis() {
+  for (const m of storyMk) {
+    const at = m.getLngLat().toArray(), off = Math.abs(((brg(cam.C, at) - cam.b + 540) % 360) - 180);
+    m.getElement().style.visibility = off < 75 ? '' : 'hidden';
+  }
+}
+function markShow() { for (const m of storyMk) m.getElement().style.visibility = ''; }
+// 当前在哪一站附近：停留时一定显示，走过 0.6 km 后收起
+function updStop(d, holding) {
+  const t = cur; if (!t || !t.stops) return;
+  let s = null;
+  for (const x of t.stops) if (x.dj <= d + 0.05) s = x;
+  if (s && !holding && d - s.dj > 0.6) s = null;
+  if (s === capS) return;
+  capS = s; stopEls.forEach((el, i) => el.classList.toggle('on', s && i === s.i));
+  document.querySelectorAll('[data-stop]').forEach(b => b.setAttribute('aria-current', !!s && +b.dataset.stop === s.i));
+  const c = $('#cap'); if (!s) { c.hidden = true; return; }
+  const P = t.prof, e = P[Math.min(P.length - 1, Math.round(s.d / P[P.length - 1][0] * (P.length - 1)))][1];
+  c.style.setProperty('--k', KC[s.kind]);
+  c.innerHTML = `<div class="c-meta">${ICON[s.kind]}第 ${s.i + 1} / ${t.stops.length} 站<span>${fmtKm(s.d)} km · 海拔 ${e.toLocaleString()} m</span></div>
+    <h3>${s.name}</h3><p>${s.text}</p>`;
+  placeCap(); c.hidden = false; c.classList.remove('in'); void c.offsetWidth; c.classList.add('in');
+}
+function placeCap() {
+  const c = $('#cap'), d = $('#detail');
+  c.style.bottom = mobile() && !d.hidden ? innerHeight - d.getBoundingClientRect().top + 10 + 'px' : '';
+}
+function goStop(s) {
+  const t = cur; if (!t) return;
+  stopTour(); pause();
+  Object.assign(cam, camFor(t, s.dj, s)); cam.alt = null; cam.T = null;
+  setProg(s.dj / t.len, false);
+  const r = along(t, s.dj);
+  map.getSource('done').setData(fc([])); map.getSource('sel').setData(fc([lineF([r.p, ...t.line.slice(r.i + 1)])]));
+  chaseMode(true);
+  const tok = ++camTok;
+  map.easeTo({ ...chase(t, s.dj), duration: reduce ? 0 : 1800, essential: true });
+  after(tok, () => { cam.alt = null; cam.T = null; setProg(s.dj / t.len, true, false, 1, s); });   // easeTo 落地时会把中心海拔归零，落地后按跟拍镜头再摆一次
+  markVis();
+}
+$('#d-stops').onclick = e => { const b = e.target.closest('[data-stop]'); if (b && cur) goStop(cur.stops[+b.dataset.stop]); };
 
 // ---------- 海拔剖面
 const drag = { on: false, moved: false };
@@ -280,6 +423,12 @@ function drawProf() {
   const grad = g.createLinearGradient(0, tp, 0, H - b); grad.addColorStop(0, col + 'aa'); grad.addColorStop(1, col + '08');
   g.beginPath(); g.moveTo(X(0), H - b); P.forEach(([d, e]) => g.lineTo(X(d), Y(e))); g.lineTo(X(L), H - b); g.closePath(); g.fillStyle = grad; g.fill();
   g.beginPath(); P.forEach(([d, e], i) => (i ? g.lineTo : g.moveTo).call(g, X(d), Y(e))); g.strokeStyle = col; g.lineWidth = 1.6; g.stroke();
+  // 看点
+  for (const s of t.stops || []) {
+    const k = Math.min(P.length - 1, Math.round(s.d / L * (P.length - 1))), on = s === capS;
+    g.beginPath(); g.arc(X(s.d), Y(P[k][1]), on ? 5 : 3.5, 0, 7); g.fillStyle = KC[s.kind]; g.fill();
+    g.lineWidth = 1.5; g.strokeStyle = '#0d1513'; g.stroke();
+  }
   // 已走
   const d = prog * L, k = Math.min(P.length - 1, Math.round(prog * (P.length - 1))), e = P[k][1];
   g.save(); g.beginPath(); g.rect(l, 0, X(d) - l, H); g.clip();
@@ -295,7 +444,7 @@ $('#prof').addEventListener('pointerdown', ev => { if (!cur) return; stopTour();
 $('#prof').addEventListener('pointermove', ev => { if (drag.on) setProg(profAt(ev), true, false, 0.35); });
 $('#prof').addEventListener('pointerup', () => { drag.on = false; });
 const layout = () => document.documentElement.style.setProperty('--top', $('#top').getBoundingClientRect().bottom + 'px');
-addEventListener('resize', () => { layout(); requestAnimationFrame(drawProf); });
+addEventListener('resize', () => { layout(); requestAnimationFrame(() => { drawProf(); placeCap(); }); });
 
 // ---------- 随机、巡游、地球视图
 let lastPick = null;
